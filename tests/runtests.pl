@@ -1615,7 +1615,7 @@ sub runhttpsserver {
     $flags .= "--ipv$ipvnum --proto $proto ";
     $flags .= "--certfile \"$certfile\" " if($certfile ne 'stunnel.pem');
     $flags .= "--stunnel \"$stunnel\" --srcdir \"$srcdir\" ";
-    $flags .= "--connect $HTTPPORT --accept $HTTPSPORT";
+    $flags .= "--connect $HTTPPORT --accept 0";
 
     my $cmd = "$perl $srcdir/secureserver.pl $flags";
     my ($httpspid, $pid2) = startnew($cmd, $pidfile, 15, 0);
@@ -1629,15 +1629,50 @@ sub runhttpsserver {
         return(0,0);
     }
 
+    # scan the log file to find out the port number stunnel listens to!
+    my $port;
+
+    open(F, "<$logfile");
+    while(<F>) {
+        if($_ =~ /bound to 0.0.0.0:(\d+)/) {
+            $port = $1;
+            last;
+        }
+    }
+    close(F);
+    if(!$port) {
+        # try with netstat
+        open(D, ">log/netstat");
+        my @n = `netstat -pltn 2>/dev/null`;
+        print D @n;
+        close(D);
+        for my $e(@n) {
+            if($e =~ /^tcp.*0.0.0.0:(\d+).*$httpspid\/stunnel/) {
+                $port = $1;
+                last;
+            }
+        }
+        if($port) {
+            logmsg "RUN: netstat says HTTPS runs on port $port\n" if($verbose);
+        }
+        else {
+            logmsg "RUN: Can't find which port it runs on!\n";
+            return (0,0,0);
+        }
+    }
+    else {
+        logmsg "RUN: the server log says HTTPS runs on port $port\n" if($verbose);
+    }
+
     # Server is up. Verify that we can speak to it.
-    my $pid3 = verifyserver($proto, $ipvnum, $idnum, $ip, $HTTPSPORT);
+    my $pid3 = verifyserver($proto, $ipvnum, $idnum, $ip, $port);
     if(!$pid3) {
         logmsg "RUN: $srvrname server failed verification\n";
         # failed to talk to it properly. Kill the server and return failure
         stopserver($server, "$httpspid $pid2");
         displaylogs($testnumcheck);
         $doesntrun{$pidfile} = 1;
-        return (0,0);
+        return (0,0,0);
     }
     # Here pid3 is actually the pid returned by the unsecure-http server.
 
@@ -1649,7 +1684,7 @@ sub runhttpsserver {
 
     sleep(1);
 
-    return ($httpspid, $pid2);
+    return ($httpspid, $pid2, $port);
 }
 
 #######################################################################
@@ -3150,7 +3185,6 @@ sub checksystem {
         logmsg sprintf("RTSP/%d ", $RTSPPORT);
         if($stunnel) {
             logmsg sprintf("FTPS/%d ", $FTPSPORT);
-            logmsg sprintf("HTTPS/%d ", $HTTPSPORT);
         }
         logmsg sprintf("TFTP/%d ", $TFTPPORT);
         if($http_ipv6) {
@@ -4795,7 +4829,8 @@ sub startservers {
                 $run{'http'}="$pid $pid2";
             }
             if(!$run{'https'}) {
-                ($pid, $pid2) = runhttpsserver($verbose, "", $certfile);
+                ($pid, $pid2, $HTTPSPORT) =
+                    runhttpsserver($verbose, "", $certfile);
                 if($pid <= 0) {
                     return "failed starting HTTPS server (stunnel)";
                 }
@@ -5438,7 +5473,6 @@ if ($gdbthis) {
 }
 
 $minport         = $base; # original base port number
-$HTTPSPORT       = $base++; # HTTPS (stunnel) server port
 $FTPSPORT        = $base++; # FTPS (stunnel) server port
 $TFTPPORT        = $base++; # TFTP (UDP) port
 $TFTP6PORT       = $base++; # TFTP IPv6 (UDP) port
